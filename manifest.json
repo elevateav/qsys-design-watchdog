@@ -1,0 +1,11 @@
+{
+  "plugin": "design_watchdog",
+  "latest": "1.6.0",
+  "hotfix": {
+    "base": "1.6.0",
+    "version": "1.6.0-hf1",
+    "url": "https://raw.githubusercontent.com/elevateav/qsys-design-watchdog/v1.6.0-hf1/hotfix.lua",
+    "sha256": "98c844e94d57674d818e267c42e87685c7eee7f629dd93cb46bc3de79829efc3",
+    "notes": "update pipeline verification"
+  }
+}
