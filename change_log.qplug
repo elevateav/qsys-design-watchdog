@@ -1,0 +1,140 @@
+-- Change Log - Elevate AV
+-- Companion to the Design Watchdog: renders the changelog file the Watchdog
+-- writes on every Acknowledge (technician, notes, list of changes). One entry
+-- per acknowledge - none of the minute-by-minute alert noise.
+
+PluginInfo = {
+  Name = "Elevate AV~Change Log",
+  Version = "1.0.0",
+  BuildVersion = "1.0.0.0",
+  Id = "com.elevateav.designchangelog",
+  Author = "Elevate AV",
+  Description = "Displays the acknowledged-change history written by the Design Watchdog plugin.",
+  ShowDebug = true,
+}
+
+function GetColor(props)
+  return {70, 90, 110}
+end
+
+function GetPrettyName(props)
+  return "Change Log " .. PluginInfo.Version
+end
+
+function GetProperties()
+  props = {
+    { Name = "Watchdog Instance Name", Type = "string", Value = "Watchdog" },
+  }
+  return props
+end
+
+function GetControls(props)
+  ctrls = {
+    { Name = "Entries",    ControlType = "Indicator", IndicatorType = "Text", PinStyle = "Output", UserPin = true, Count = 1 },
+    { Name = "Last Entry", ControlType = "Indicator", IndicatorType = "Text", PinStyle = "Output", UserPin = true, Count = 1 },
+    { Name = "Changelog",  ControlType = "Indicator", IndicatorType = "Text",                                      Count = 1 },
+    { Name = "Refresh",    ControlType = "Button",    ButtonType = "Trigger",                                      Count = 1 },
+  }
+  return ctrls
+end
+
+function GetControlLayout(props)
+  layout = {}
+  graphics = {}
+  table.insert(graphics, { Type = "GroupBox", Text = "Change Log (acknowledged changes)", Position = { 5, 0 }, Size = { 635, 344 }, HTextAlign = "Left" })
+  table.insert(graphics, { Type = "Text", Text = "Entries",    Position = { 10, 12 },  Size = { 60, 16 },  HTextAlign = "Right" })
+  table.insert(graphics, { Type = "Text", Text = "Last entry", Position = { 150, 12 }, Size = { 70, 16 },  HTextAlign = "Right" })
+
+  layout["Entries"]    = { Style = "Text", Position = { 75, 10 },  Size = { 60, 18 } }
+  layout["Last Entry"] = { Style = "Text", Position = { 225, 10 }, Size = { 405, 18 } }
+  layout["Changelog"]  = { Style = "Text", Position = { 10, 36 },  Size = { 620, 266 } }
+  layout["Refresh"]    = { Style = "Button", Legend = "Refresh", Position = { 10, 310 }, Size = { 90, 24 } }
+
+  return layout, graphics
+end
+
+--------------------------------------------------------------------------------
+-- Runtime
+--------------------------------------------------------------------------------
+if Controls then
+
+local INST = "Watchdog"
+do
+  local ok, p = pcall(function() return Properties["Watchdog Instance Name"].Value end)
+  if ok and p ~= nil and p ~= "" then INST = tostring(p) end
+end
+INST = INST:gsub("[^%w%-_]", "_")
+
+local CHG_FILE = "media/" .. INST .. "_dw_changelog.txt"
+
+local lastSize = -1
+
+local function render()
+  local f = io.open(CHG_FILE, "r")
+  if not f then
+    Controls["Changelog"].String = "(no changelog yet - waiting for the first acknowledged change from Watchdog instance '" .. INST .. "')"
+    Controls["Entries"].String = "0"
+    Controls["Last Entry"].String = ""
+    return
+  end
+  local entries = {}
+  local cur = nil
+  for line in f:lines() do
+    if line:sub(1, 5) == "=====" then
+      cur = { line }
+      entries[#entries + 1] = cur
+    elseif cur then
+      cur[#cur + 1] = line
+    end
+  end
+  f:close()
+  Controls["Entries"].String = tostring(#entries)
+  if #entries > 0 then
+    local newest = entries[#entries]
+    local ts = newest[1]:match("^=====%s*(.-)%s*=====") or ""
+    local tech = ""
+    for _, l in ipairs(newest) do
+      local t = l:match("^Technician:%s*(.+)")
+      if t then tech = t break end
+    end
+    Controls["Last Entry"].String = ts .. ((tech ~= "" and tech ~= "(not given)") and (" - " .. tech) or "")
+  else
+    Controls["Last Entry"].String = ""
+  end
+  -- newest first, capped
+  local out = {}
+  local chars = 0
+  for i = #entries, 1, -1 do
+    local block = table.concat(entries[i], "\n")
+    chars = chars + #block
+    if chars > 6000 and #out > 0 then
+      out[#out + 1] = "... (older entries in " .. CHG_FILE .. ")"
+      break
+    end
+    out[#out + 1] = block
+  end
+  Controls["Changelog"].String = table.concat(out, "\n\n")
+end
+
+local function checkFile()
+  local f = io.open(CHG_FILE, "r")
+  local size = -1
+  if f then size = f:seek("end") f:close() end
+  if size ~= lastSize then
+    lastSize = size
+    render()
+  end
+end
+
+local poll = Timer.New()
+poll.EventHandler = checkFile
+poll:Start(10)
+
+Controls["Refresh"].EventHandler = function()
+  lastSize = -2
+  checkFile()
+end
+
+checkFile()
+
+end
