@@ -1,0 +1,1388 @@
+-- Design Watchdog - Elevate AV
+-- Logs design redeploys (with a control-level diff) and live control edits on a
+-- running core. Auto-discovers every component with Script Access; no watch
+-- list needed. Drives BANNER components red/amber/green, feeds a changelog
+-- file on Acknowledge. See design-watchdog-plugin.md for setup and caveats.
+
+PluginInfo = {
+  Name = "Elevate AV~Design Watchdog",
+  Version = "1.6.0",
+  BuildVersion = "1.6.0.0",
+  Id = "com.elevateav.designwatchdog",
+  Author = "Elevate AV",
+  Description = "Logs design redeploys and live control edits with timestamps, diffs, banners, changelog output, Reflect proxy push, and optional email alerts.",
+  ShowDebug = true,
+  -- Managed-plugin fields, kept for the record: field set verified against
+  -- QSC's Samsung MDC / Shure MXW managed plugins (2026-09). Designer reads
+  -- them (Reflect.Types resolves at design time) but only honors IsManaged on
+  -- QSC-signed plugins (the DIGITAL SIGNATURE block) - tested and confirmed
+  -- the Is Managed property never appears on an unsigned .qplug. Harmless to
+  -- keep; Reflect integration goes through a Monitoring Proxy instead (see
+  -- the Proxy Name setting).
+  Manufacturer = "Elevate AV",
+  Model = "Design Watchdog",
+  IsManaged = true,
+  Type = Reflect and Reflect.Types.Other or 0,
+}
+
+function GetColor(props)
+  return {88, 88, 96}
+end
+
+function GetPrettyName(props)
+  return "Design Watchdog " .. PluginInfo.Version
+end
+
+function GetProperties()
+  props = {
+    { Name = "Instance Name", Type = "string", Value = "Watchdog" },
+  }
+  return props
+end
+
+function GetControls(props)
+  ctrls = {
+    { Name = "Status",                  ControlType = "Indicator", IndicatorType = "Status", PinStyle = "Output", UserPin = true,  Count = 1 },
+    { Name = "Watched",                 ControlType = "Indicator", IndicatorType = "Text",                                          Count = 1 },
+    { Name = "Last Change",             ControlType = "Indicator", IndicatorType = "Text",   PinStyle = "Output", UserPin = true,  Count = 1 },
+    { Name = "Change Count",            ControlType = "Indicator", IndicatorType = "Text",   PinStyle = "Output", UserPin = true,  Count = 1 },
+    { Name = "Unacknowledged",          ControlType = "Indicator", IndicatorType = "LED",    PinStyle = "Output", UserPin = true,  Count = 1 },
+    { Name = "Log",                     ControlType = "Indicator", IndicatorType = "Text",                                          Count = 1 },
+    { Name = "Change Notes",            ControlType = "Text",                                                                       Count = 1 },
+    { Name = "Technician",              ControlType = "Text",                                                                       Count = 1 },
+    { Name = "Acknowledge",             ControlType = "Button",    ButtonType = "Trigger",   PinStyle = "Input",  UserPin = true,  Count = 1 },
+    { Name = "Clear Log",               ControlType = "Button",    ButtonType = "Trigger",                                          Count = 1 },
+    { Name = "Maintenance Mode",        ControlType = "Button",    ButtonType = "Toggle",    PinStyle = "Input",  UserPin = true,  Count = 1 },
+    { Name = "Banner",                  ControlType = "Button",    ButtonType = "Trigger",                                          Count = 1 },
+    { Name = "Site Name",               ControlType = "Text",                                                                       Count = 1 },
+    { Name = "Ignore List",             ControlType = "Text",                                                                       Count = 1 },
+    { Name = "User Controls",           ControlType = "Text",                                                                       Count = 1 },
+    { Name = "Banner Name",             ControlType = "Text",                                                                       Count = 1 },
+    { Name = "Proxy Name",              ControlType = "Text",      TextType = "ComboBox",                                           Count = 1 },
+    { Name = "Settle Time",             ControlType = "Knob",      ControlUnit = "Seconds",  Min = 1, Max = 60, DefaultValue = 5,  Count = 1 },
+    { Name = "Maintenance Hours",       ControlType = "Knob",      ControlUnit = "Integer",  Min = 1, Max = 48, DefaultValue = 4,  Count = 1 },
+    { Name = "Tech Timeout",            ControlType = "Knob",      ControlUnit = "Integer",  Min = 1, Max = 24, DefaultValue = 8,  Count = 1 },
+    { Name = "Webhook URL",             ControlType = "Text",                                                                       Count = 1 },
+    { Name = "Webhook Secret",          ControlType = "Text",                                                                       Count = 1 },
+    { Name = "Update Available",        ControlType = "Indicator", IndicatorType = "LED",    PinStyle = "Output", UserPin = true,  Count = 1 },
+    { Name = "Update Info",             ControlType = "Indicator", IndicatorType = "Text",   PinStyle = "Output", UserPin = true,  Count = 1 },
+    { Name = "Installed Hotfix",        ControlType = "Indicator", IndicatorType = "Text",                                          Count = 1 },
+    { Name = "Check Updates",           ControlType = "Button",    ButtonType = "Trigger",                                          Count = 1 },
+    { Name = "Install Update",          ControlType = "Button",    ButtonType = "Trigger",   PinStyle = "Input",  UserPin = true,  Count = 1 },
+    { Name = "Passcode",                ControlType = "Text",                                                                       Count = 1 },
+    { Name = "Update URL",              ControlType = "Text",                                                                       Count = 1 },
+    { Name = "Update Passcode",         ControlType = "Text",                                                                       Count = 1 },
+    { Name = "Latch Until Acknowledged",ControlType = "Button",    ButtonType = "Toggle",                                           Count = 1 },
+    { Name = "Email Enable",            ControlType = "Button",    ButtonType = "Toggle",                                           Count = 1 },
+    { Name = "SMTP2GO API Key",         ControlType = "Text",                                                                       Count = 1 },
+    { Name = "Email From",              ControlType = "Text",                                                                       Count = 1 },
+    { Name = "Email To",                ControlType = "Text",                                                                       Count = 1 },
+    { Name = "Rescan",                  ControlType = "Button",    ButtonType = "Trigger",                                          Count = 1 },
+    { Name = "APPLY",                   ControlType = "Button",    ButtonType = "Trigger",                                          Count = 1 },
+    { Name = "Debug",                   ControlType = "Button",    ButtonType = "Toggle",                                           Count = 1 },
+  }
+  return ctrls
+end
+
+function GetPages(props)
+  pages = {}
+  table.insert(pages, { name = "Monitor" })
+  table.insert(pages, { name = "Setup" })
+  table.insert(pages, { name = "Update" })
+  return pages
+end
+
+function GetControlLayout(props)
+  layout = {}
+  graphics = {}
+  local page = 1
+  if props["page_index"] then page = props["page_index"].Value end
+
+  if page == 1 then
+    table.insert(graphics, { Type = "GroupBox", Text = "Design Watchdog - Activity", Position = { 5, 0 }, Size = { 635, 446 }, HTextAlign = "Left" })
+    table.insert(graphics, { Type = "Text", Text = "Status",      Position = { 10, 42 },  Size = { 80, 16 }, HTextAlign = "Right" })
+    table.insert(graphics, { Type = "Text", Text = "Watching",    Position = { 355, 42 }, Size = { 85, 16 }, HTextAlign = "Right" })
+    table.insert(graphics, { Type = "Text", Text = "Unacked",     Position = { 10, 66 },  Size = { 80, 16 }, HTextAlign = "Right" })
+    table.insert(graphics, { Type = "Text", Text = "Last change", Position = { 120, 66 }, Size = { 78, 16 }, HTextAlign = "Right" })
+    table.insert(graphics, { Type = "Text", Text = "Count",       Position = { 542, 66 }, Size = { 44, 16 }, HTextAlign = "Right" })
+    table.insert(graphics, { Type = "Text", Text = "Notes",       Position = { 10, 370 }, Size = { 50, 16 }, HTextAlign = "Right" })
+    table.insert(graphics, { Type = "Text", Text = "Tech",        Position = { 10, 418 }, Size = { 50, 16 }, HTextAlign = "Right" })
+
+    layout["Banner"]          = { Style = "Button", Legend = "WATCHDOG", Position = { 10, 8 }, Size = { 620, 26 } }
+    layout["Status"]          = { Style = "Indicator", Position = { 95, 40 },  Size = { 250, 18 } }
+    layout["Watched"]         = { Style = "Text",      Position = { 445, 40 }, Size = { 185, 18 } }
+    layout["Unacknowledged"]  = { Style = "LED",       Position = { 95, 65 },  Size = { 18, 18 } }
+    layout["Last Change"]     = { Style = "Text",      Position = { 202, 65 }, Size = { 336, 18 } }
+    layout["Change Count"]    = { Style = "Text",      Position = { 590, 65 }, Size = { 40, 18 } }
+    layout["Log"]             = { Style = "Text",      Position = { 10, 90 },  Size = { 620, 270 } }
+    layout["Change Notes"]    = { Style = "Text",      Position = { 65, 366 }, Size = { 565, 44 } }
+    layout["Technician"]      = { Style = "Text",      Position = { 65, 414 }, Size = { 240, 22 } }
+    layout["Acknowledge"]     = { Style = "Button", Legend = "Acknowledge", Position = { 315, 414 }, Size = { 98, 22 } }
+    layout["Clear Log"]       = { Style = "Button", Legend = "Clear Log",   Position = { 421, 414 }, Size = { 86, 22 } }
+    layout["Maintenance Mode"]= { Style = "Button", Legend = "Maintenance", Position = { 515, 414 }, Size = { 115, 22 } }
+  elseif page == 2 then
+    table.insert(graphics, { Type = "GroupBox", Text = "Watchdog Setup", Position = { 5, 0 }, Size = { 635, 428 }, HTextAlign = "Left" })
+    table.insert(graphics, { Type = "Text", Text = "Site Name",     Position = { 10, 22 },  Size = { 110, 16 }, HTextAlign = "Right" })
+    table.insert(graphics, { Type = "Text", Text = "Ignore List",   Position = { 10, 50 },  Size = { 110, 16 }, HTextAlign = "Right" })
+    table.insert(graphics, { Type = "Text", Text = "Comma-separated substrings of component names to skip entirely (e.g. noisy giant routers)", Position = { 125, 70 }, Size = { 505, 14 }, HTextAlign = "Left" })
+    table.insert(graphics, { Type = "Text", Text = "User Controls", Position = { 10, 96 },  Size = { 110, 16 }, HTextAlign = "Right" })
+    table.insert(graphics, { Type = "Text", Text = "Daily-driver controls to exclude (UCI volume/mutes/selects) - 'comp' or 'comp/control' substrings", Position = { 125, 116 }, Size = { 505, 14 }, HTextAlign = "Left" })
+    table.insert(graphics, { Type = "Text", Text = "Banner Name",   Position = { 10, 142 }, Size = { 110, 16 }, HTextAlign = "Right" })
+    table.insert(graphics, { Type = "Text", Text = "Proxy Name",    Position = { 380, 142 }, Size = { 95, 16 }, HTextAlign = "Right" })
+    table.insert(graphics, { Type = "Text", Text = "Banner: components named with this are driven red/amber/green (not watched). Proxy: Monitoring Proxy code name for Reflect status + event log.", Position = { 125, 162 }, Size = { 505, 14 }, HTextAlign = "Left" })
+    table.insert(graphics, { Type = "Text", Text = "Settle Time",   Position = { 10, 196 },  Size = { 110, 16 }, HTextAlign = "Right" })
+    table.insert(graphics, { Type = "Text", Text = "Maint Hrs",     Position = { 172, 196 }, Size = { 62, 16 }, HTextAlign = "Right" })
+    table.insert(graphics, { Type = "Text", Text = "Tech Hrs",      Position = { 287, 196 }, Size = { 62, 16 }, HTextAlign = "Right" })
+    table.insert(graphics, { Type = "Text", Text = "Latch",         Position = { 425, 196 }, Size = { 65, 16 }, HTextAlign = "Right" })
+    table.insert(graphics, { Type = "Text", Text = "Email Alerts",  Position = { 10, 240 }, Size = { 110, 16 }, HTextAlign = "Right" })
+    table.insert(graphics, { Type = "Text", Text = "API Key",       Position = { 10, 268 }, Size = { 110, 16 }, HTextAlign = "Right" })
+    table.insert(graphics, { Type = "Text", Text = "From",          Position = { 10, 294 }, Size = { 110, 16 }, HTextAlign = "Right" })
+    table.insert(graphics, { Type = "Text", Text = "To",            Position = { 385, 294 }, Size = { 30, 16 }, HTextAlign = "Right" })
+    table.insert(graphics, { Type = "Text", Text = "Email via SMTP2GO REST over HTTPS. Tech Hrs clears a stale Technician name after that many hours.", Position = { 125, 318 }, Size = { 505, 14 }, HTextAlign = "Left" })
+    table.insert(graphics, { Type = "Text", Text = "Webhook URL",   Position = { 10, 342 }, Size = { 110, 16 }, HTextAlign = "Right" })
+    table.insert(graphics, { Type = "Text", Text = "Secret",        Position = { 10, 368 }, Size = { 110, 16 }, HTextAlign = "Right" })
+    table.insert(graphics, { Type = "Text", Text = "POSTs one JSON entry per Acknowledge (for a Hudu/Syncro relay)", Position = { 385, 368 }, Size = { 245, 14 }, HTextAlign = "Left" })
+    table.insert(graphics, { Type = "Text", Text = "Debug",         Position = { 335, 398 }, Size = { 50, 16 }, HTextAlign = "Right" })
+
+    layout["Site Name"]                = { Style = "Text",   Position = { 125, 20 },  Size = { 250, 20 } }
+    layout["Ignore List"]              = { Style = "Text",   Position = { 125, 48 },  Size = { 505, 20 } }
+    layout["User Controls"]            = { Style = "Text",   Position = { 125, 94 },  Size = { 505, 20 } }
+    layout["Banner Name"]              = { Style = "Text",   Position = { 125, 140 }, Size = { 250, 20 } }
+    layout["Proxy Name"]               = { Style = "ComboBox", Position = { 480, 140 }, Size = { 150, 20 } }
+    layout["Settle Time"]              = { Style = "Knob",   Position = { 125, 186 }, Size = { 40, 40 } }
+    layout["Maintenance Hours"]        = { Style = "Knob",   Position = { 240, 186 }, Size = { 40, 40 } }
+    layout["Tech Timeout"]             = { Style = "Knob",   Position = { 355, 186 }, Size = { 40, 40 } }
+    layout["Latch Until Acknowledged"] = { Style = "Button", Legend = "Until Ack", Position = { 495, 192 }, Size = { 100, 22 } }
+    layout["Email Enable"]             = { Style = "Button", Legend = "Email",  Position = { 125, 238 }, Size = { 60, 22 } }
+    layout["SMTP2GO API Key"]          = { Style = "Text",   Position = { 125, 266 }, Size = { 505, 20 } }
+    layout["Email From"]               = { Style = "Text",   Position = { 125, 292 }, Size = { 250, 20 } }
+    layout["Email To"]                 = { Style = "Text",   Position = { 420, 292 }, Size = { 210, 20 } }
+    layout["Webhook URL"]              = { Style = "Text",   Position = { 125, 340 }, Size = { 505, 20 } }
+    layout["Webhook Secret"]           = { Style = "Text",   Position = { 125, 366 }, Size = { 250, 20 } }
+    layout["Rescan"]                   = { Style = "Button", Legend = "Rescan", Position = { 125, 394 }, Size = { 90, 26 } }
+    layout["APPLY"]                    = { Style = "Button", Legend = "APPLY",  Position = { 225, 394 }, Size = { 90, 26 } }
+    layout["Debug"]                    = { Style = "Button", Legend = "Debug",  Position = { 390, 394 }, Size = { 70, 26 } }
+  elseif page == 3 then
+    table.insert(graphics, { Type = "GroupBox", Text = "Remote Update", Position = { 5, 0 }, Size = { 635, 216 }, HTextAlign = "Left" })
+    table.insert(graphics, { Type = "Text", Text = "Available",    Position = { 10, 14 },  Size = { 110, 16 }, HTextAlign = "Right" })
+    table.insert(graphics, { Type = "Text", Text = "Installed",    Position = { 10, 40 },  Size = { 110, 16 }, HTextAlign = "Right" })
+    table.insert(graphics, { Type = "Text", Text = "Manifest URL", Position = { 10, 66 },  Size = { 110, 16 }, HTextAlign = "Right" })
+    table.insert(graphics, { Type = "Text", Text = "Req. Passcode",Position = { 10, 92 },  Size = { 110, 16 }, HTextAlign = "Right" })
+    table.insert(graphics, { Type = "Text", Text = "blank = no passcode gate (a PIN-protected tech UCI also works)", Position = { 285, 94 }, Size = { 345, 14 }, HTextAlign = "Left" })
+    table.insert(graphics, { Type = "Text", Text = "Passcode",     Position = { 250, 134 }, Size = { 80, 16 }, HTextAlign = "Right" })
+    table.insert(graphics, { Type = "Text", Text = "Install fetches the runtime hotfix module from the manifest, verifies sha256, caches to media/, runs it now and on every boot, and writes a changelog entry. Full plugin versions still install via Designer.", Position = { 15, 168 }, Size = { 610, 40 }, HTextAlign = "Left" })
+
+    layout["Update Available"] = { Style = "LED",  Position = { 125, 13 },  Size = { 18, 18 } }
+    layout["Update Info"]      = { Style = "Text", Position = { 150, 12 },  Size = { 480, 20 } }
+    layout["Installed Hotfix"] = { Style = "Text", Position = { 125, 38 },  Size = { 300, 20 } }
+    layout["Update URL"]       = { Style = "Text", Position = { 125, 64 },  Size = { 505, 20 } }
+    layout["Update Passcode"]  = { Style = "Text", Position = { 125, 90 },  Size = { 150, 20 } }
+    layout["Check Updates"]    = { Style = "Button", Legend = "Check Now",      Position = { 125, 128 }, Size = { 110, 26 } }
+    layout["Passcode"]         = { Style = "Text",   Position = { 335, 130 }, Size = { 110, 22 } }
+    layout["Install Update"]   = { Style = "Button", Legend = "Install Update", Position = { 470, 128 }, Size = { 160, 26 } }
+  end
+
+  return layout, graphics
+end
+
+--------------------------------------------------------------------------------
+-- Runtime
+--------------------------------------------------------------------------------
+if Controls then
+
+local ok_json, json = pcall(require, "rapidjson")
+if not ok_json then ok_json, json = pcall(require, "json") end
+if not ok_json then json = nil end
+
+local INST = "Watchdog"
+do
+  local ok, p = pcall(function() return Properties["Instance Name"].Value end)
+  if ok and p ~= nil and p ~= "" then INST = tostring(p) end
+end
+INST = INST:gsub("[^%w%-_]", "_")
+
+local SETTINGS_FILE = "media/" .. INST .. "_dw_settings.json"
+local STATE_FILE    = "media/" .. INST .. "_dw_state.txt"
+local LOG_FILE      = "media/" .. INST .. "_dw_log.txt"
+local PEND_FILE     = "media/" .. INST .. "_dw_pending.txt"
+local CHG_FILE      = "media/" .. INST .. "_dw_changelog.txt"
+
+local DBG = false
+local function dbg(...) if DBG then print("[DW]", ...) end end
+
+local function now() return os.date("%Y-%m-%d %H:%M:%S") end
+
+local proxyPushStatus -- forward: mirrors status into the Monitoring Proxy when configured
+
+local function setStatus(v, msg)
+  Controls["Status"].Value = v
+  Controls["Status"].String = msg or ""
+  if proxyPushStatus then proxyPushStatus(v, msg or "") end
+end
+
+local function inMaint() return Controls["Maintenance Mode"].Boolean end
+
+-- ---------------- log ring + file ----------------
+local LOGV = {}
+
+local function refreshLogControl()
+  local n = #LOGV
+  local first = n - 39
+  if first < 1 then first = 1 end
+  local t = {}
+  for i = n, first, -1 do t[#t + 1] = LOGV[i] end
+  Controls["Log"].String = table.concat(t, "\n")
+end
+
+local function log(line, isChange)
+  local entry = now() .. "  " .. line
+  LOGV[#LOGV + 1] = entry
+  if #LOGV > 250 then table.remove(LOGV, 1) end
+  refreshLogControl()
+  local f = io.open(LOG_FILE, "a")
+  if f then f:write(entry, "\n") f:close() end
+  if isChange then Controls["Last Change"].String = entry end
+  dbg(entry)
+end
+
+local function loadLogTail()
+  local f = io.open(LOG_FILE, "r")
+  if not f then return end
+  local all = {}
+  for line in f:lines() do all[#all + 1] = line end
+  f:close()
+  local first = #all - 199
+  if first < 1 then first = 1 end
+  for i = first, #all do LOGV[#LOGV + 1] = all[i] end
+  refreshLogControl()
+  if #all > 4000 then
+    local w = io.open(LOG_FILE, "w")
+    if w then
+      for i = #all - 999, #all do w:write(all[i], "\n") end
+      w:close()
+    end
+  end
+end
+
+-- ---------------- settings ----------------
+local LASTACK, LASTACKBY = "", ""
+
+local SET_KEYS = {
+  { c = "Site Name",                k = "site",    t = "s" },
+  { c = "Ignore List",              k = "ignore",  t = "s" },
+  { c = "User Controls",            k = "userctl", t = "s" },
+  { c = "Banner Name",              k = "banner",  t = "s" },
+  { c = "Proxy Name",               k = "proxy",   t = "s" },
+  { c = "Settle Time",              k = "settle",  t = "n" },
+  { c = "Maintenance Hours",        k = "mainthrs",t = "n" },
+  { c = "Tech Timeout",             k = "techhrs", t = "n" },
+  { c = "Webhook URL",              k = "whurl",   t = "s" },
+  { c = "Webhook Secret",           k = "whsecret",t = "s" },
+  { c = "Update URL",               k = "upurl",   t = "s" },
+  { c = "Update Passcode",          k = "uppass",  t = "s" },
+  { c = "Latch Until Acknowledged", k = "latch",   t = "b" },
+  { c = "Email Enable",             k = "email",   t = "b" },
+  { c = "SMTP2GO API Key",          k = "apikey",  t = "s" },
+  { c = "Email From",               k = "from",    t = "s" },
+  { c = "Email To",                 k = "to",      t = "s" },
+  { c = "Debug",                    k = "debug",   t = "b" },
+}
+
+local function saveSettings()
+  if not json then return end
+  local t = {}
+  for _, d in ipairs(SET_KEYS) do
+    local c = Controls[d.c]
+    if d.t == "s" then t[d.k] = c.String
+    elseif d.t == "n" then t[d.k] = c.Value
+    else t[d.k] = (c.Boolean and true or false) end
+  end
+  t.lastack = LASTACK
+  t.lastackby = LASTACKBY
+  local f = io.open(SETTINGS_FILE, "w")
+  if f then f:write(json.encode(t)) f:close() end
+end
+
+local function loadSettings()
+  if not json then return false end
+  local f = io.open(SETTINGS_FILE, "r")
+  if not f then return false end
+  local raw = f:read("*a")
+  f:close()
+  local ok, t = pcall(json.decode, raw)
+  if not ok or type(t) ~= "table" then return false end
+  for _, d in ipairs(SET_KEYS) do
+    local v = t[d.k]
+    if v ~= nil then
+      local c = Controls[d.c]
+      if d.t == "s" then c.String = tostring(v)
+      elseif d.t == "n" then c.Value = tonumber(v) or c.Value
+      else
+        local b = (v == true)
+        c.Boolean = b
+        c.Value = b and 1 or 0
+      end
+    end
+  end
+  if type(t.lastack) == "string" then LASTACK = t.lastack end
+  if type(t.lastackby) == "string" then LASTACKBY = t.lastackby end
+  return true
+end
+
+-- ---------------- value encoding ----------------
+local function enc(v)
+  local s = (v == nil) and "" or tostring(v)
+  if #s > 160 then
+    local sum = 0
+    for i = 1, #s, 17 do sum = (sum + s:byte(i)) % 1000000 end
+    return string.format("[text %d ch, sum %d]", #s, sum)
+  end
+  s = s:gsub("\\", "\\\\"):gsub("\n", "\\n"):gsub("\r", "\\r"):gsub("\t", "\\t")
+  return s
+end
+
+local function readVal(c)
+  local ok, s = pcall(function() return c.String end)
+  if ok and s ~= nil then return enc(s) end
+  local ok2, v = pcall(function() return c.Value end)
+  if ok2 then return enc(v) end
+  return ""
+end
+
+-- ---------------- filters ----------------
+local function splitCSV(s)
+  local out = {}
+  for tok in tostring(s or ""):gmatch("[^,]+") do
+    tok = tok:match("^%s*(.-)%s*$")
+    if tok ~= "" then out[#out + 1] = tok end
+  end
+  return out
+end
+
+local IGN, USR = {}, {}
+local BANNERPAT = ""
+local PROXYNAME = ""
+local function refreshFilters()
+  IGN, USR = {}, {}
+  for _, p in ipairs(splitCSV(Controls["Ignore List"].String)) do
+    IGN[#IGN + 1] = p:lower()
+  end
+  for _, p in ipairs(splitCSV(Controls["User Controls"].String)) do
+    USR[#USR + 1] = p:lower()
+  end
+  BANNERPAT = tostring(Controls["Banner Name"].String or ""):lower()
+  PROXYNAME = tostring(Controls["Proxy Name"].String or ""):match("^%s*(.-)%s*$"):lower()
+end
+
+local function isIgnored(name)
+  local ln = name:lower()
+  for _, p in ipairs(IGN) do
+    if ln:find(p, 1, true) then return true end
+  end
+  return false
+end
+
+local function isBanner(name)
+  if BANNERPAT == "" then return false end
+  return name:lower():find(BANNERPAT, 1, true) ~= nil
+end
+
+-- daily-driver controls (UCI volume, mutes, source selects): matched against
+-- "component/control" (lowercase), plain substring - so "room volume" hits the
+-- whole component and "/mute" hits every mute in the design
+local function isUserControl(comp, ctrl)
+  if #USR == 0 then return false end
+  local key = (comp .. "/" .. ctrl):lower()
+  for _, p in ipairs(USR) do
+    if key:find(p, 1, true) then return true end
+  end
+  return false
+end
+
+-- ---------------- state (snapshot) file ----------------
+local oldSnap, oldCode, oldName = nil, nil, nil
+
+local function loadState()
+  local f = io.open(STATE_FILE, "r")
+  if not f then return end
+  oldSnap = {}
+  local first = true
+  for line in f:lines() do
+    if first then
+      oldCode, oldName = line:match("^#code\t([^\t]*)\t(.*)$")
+      first = false
+    else
+      local comp, ctrl, val = line:match("^([^\t]*)\t([^\t]*)\t(.*)$")
+      if comp then
+        local t = oldSnap[comp]
+        if not t then t = {} oldSnap[comp] = t end
+        t[ctrl] = val
+      end
+    end
+  end
+  f:close()
+end
+
+-- ---------------- pending-since-ack file ----------------
+local function appendPending(lines)
+  local f = io.open(PEND_FILE, "a")
+  if not f then return end
+  for _, l in ipairs(lines) do f:write(l, "\n") end
+  f:close()
+end
+
+local function readPending(cap)
+  local f = io.open(PEND_FILE, "r")
+  if not f then return {}, 0 end
+  local out, n = {}, 0
+  for line in f:lines() do
+    n = n + 1
+    if n <= cap then out[#out + 1] = line end
+  end
+  f:close()
+  return out, n
+end
+
+local function clearPending()
+  local f = io.open(PEND_FILE, "w")
+  if f then f:close() end
+end
+
+-- ---------------- changelog file ----------------
+local function appendChangelog(tech, notes, lines, total)
+  -- trim if oversized: keep the newer half of entries
+  local f = io.open(CHG_FILE, "r")
+  if f then
+    local size = f:seek("end")
+    f:close()
+    if size and size > 300000 then
+      local all = {}
+      local r = io.open(CHG_FILE, "r")
+      for line in r:lines() do all[#all + 1] = line end
+      r:close()
+      local start = 1
+      for i = math.floor(#all / 2), #all do
+        if all[i] and all[i]:sub(1, 5) == "=====" then start = i break end
+      end
+      local w = io.open(CHG_FILE, "w")
+      if w then
+        for i = start, #all do w:write(all[i], "\n") end
+        w:close()
+      end
+    end
+  end
+  local a = io.open(CHG_FILE, "a")
+  if not a then dbg("cannot write changelog") return end
+  a:write("===== ", now(), " =====\n")
+  a:write("Technician: ", (tech == "" and "(not given)" or tech), "\n")
+  a:write("Notes: ", (notes == "" and "(none)" or notes), "\n")
+  a:write("Changes (", tostring(total), "):\n")
+  if total == 0 then
+    a:write("  (no control changes - note only)\n")
+  else
+    for _, l in ipairs(lines) do a:write(l, "\n") end
+    if total > #lines then a:write("  ... and ", tostring(total - #lines), " more\n") end
+  end
+  a:write("\n")
+  a:close()
+end
+
+-- ---------------- runtime state ----------------
+local snap = {}
+local nComps, nCtrls = 0, 0
+local GEN = 0
+local pending, pendingN = {}, 0
+local totalSinceAck = tonumber(Controls["Change Count"].String) or 0
+local maintDeadline = 0
+local BANNERS = {}
+
+local settleTimer  = Timer.New()
+local builderTimer = Timer.New()
+local saveTimer    = Timer.New()
+local maintTimer   = Timer.New()
+local nagTimer     = Timer.New()
+local techTimer    = Timer.New()
+
+-- ---------------- technician staleness ----------------
+-- Whoever last typed a name isn't necessarily whoever is acking now: the
+-- field expires after Tech Timeout hours since it was last touched (typing
+-- or acknowledging refreshes the clock), and is cleared on redeploy restarts.
+local techTouched = os.time()
+local function techTouch() techTouched = os.time() end
+
+techTimer.EventHandler = function()
+  if Controls["Technician"].String == "" then return end
+  local hrs = tonumber(Controls["Tech Timeout"].Value) or 8
+  if hrs < 1 then hrs = 1 end
+  if os.time() - techTouched >= hrs * 3600 then
+    Controls["Technician"].String = ""
+    log(string.format("Technician field cleared (stale after %dh) - next acknowledge must re-identify", hrs))
+  end
+end
+
+Controls["Technician"].EventHandler = function() techTouch() end
+
+local queue, qi, cursor = {}, 0, nil
+local redeploy, firstRun = false, false
+
+-- ---------------- banner drive ----------------
+local COL_RED, COL_AMBER, COL_GREEN = "#CC3333", "#E5A11C", "#2E8B57"
+local COL_DIM = "#3A4A42"
+
+local function updateBanner()
+  local msg, color, lit
+  local bLegend, bColor, bDisabled
+  if inMaint() then
+    msg = "MAINTENANCE MODE - change alerts paused until " .. os.date("%H:%M", maintDeadline)
+    color = COL_AMBER
+    lit = true
+    bLegend = msg
+    bColor = COL_AMBER
+    bDisabled = true
+  elseif Controls["Unacknowledged"].Boolean then
+    msg = "UNRECORDED CHANGES - enter notes + technician in Design Watchdog and press Acknowledge"
+    color = COL_RED
+    lit = true
+    bLegend = "UNRECORDED CHANGES - PRESS TO RECORD (fill Technician + Notes first)"
+    bColor = COL_RED
+    bDisabled = false
+  else
+    msg = "No unrecorded changes"
+    if LASTACK ~= "" then
+      msg = msg .. " - last ack " .. LASTACK
+      if LASTACKBY ~= "" then msg = msg .. " by " .. LASTACKBY end
+    end
+    color = COL_GREEN
+    lit = false
+    bLegend = "Watchdog OK - no unrecorded changes"
+    if LASTACK ~= "" then
+      bLegend = bLegend .. " (last ack " .. LASTACK .. (LASTACKBY ~= "" and (" by " .. LASTACKBY) or "") .. ")"
+    end
+    bColor = COL_DIM
+    bDisabled = true
+  end
+  pcall(function() Controls["Banner"].Legend = bLegend end)
+  pcall(function() Controls["Banner"].Color = bColor end)
+  pcall(function() Controls["Banner"].IsDisabled = bDisabled end)
+  for _, b in ipairs(BANNERS) do
+    for _, cname in ipairs(b.ctrls) do
+      pcall(function() b.comp[cname].String = msg end)
+      pcall(function() b.comp[cname].Color = color end)
+      pcall(function() b.comp[cname].Boolean = lit end)
+    end
+  end
+end
+
+-- ---------------- Monitoring Proxy (Reflect) ----------------
+-- Managed-plugin status is signature-gated to QSC, so Reflect presence goes
+-- through a Monitoring Proxy driven by code name: status mirror + log-entry
+-- push (the documented bridge for script entries into the Reflect event log).
+local PROXY = nil
+local PROXYCTL = { status = nil, logtext = nil, logtrig = nil, sever = nil }
+
+local function attachProxy()
+  PROXY = nil
+  PROXYCTL = { status = nil, logtext = nil, logtrig = nil, sever = nil }
+  local name = Controls["Proxy Name"].String:match("^%s*(.-)%s*$")
+  if name == "" then return end
+  local ok, comp = pcall(Component.New, name)
+  if not ok or comp == nil then
+    dbg("proxy not found:", name)
+    log("WARNING: Monitoring Proxy '" .. name .. "' not found (check code name + Script Access)")
+    return
+  end
+  local okl, cl = pcall(Component.GetControls, comp)
+  if not okl or type(cl) ~= "table" then
+    dbg("proxy controls unreadable:", name)
+    return
+  end
+  local texts = {}
+  for _, ci in ipairs(cl) do
+    local n = tostring(ci.Name or ""):lower()
+    local t = tostring(ci.Type or "")
+    if t == "Status" or (PROXYCTL.status == nil and n:find("status", 1, true)) then
+      PROXYCTL.status = ci.Name
+    elseif n:find("sever", 1, true) then
+      PROXYCTL.sever = ci.Name
+    elseif n:find("log", 1, true) then
+      if t == "Trigger" then
+        PROXYCTL.logtrig = ci.Name
+      else
+        texts[#texts + 1] = ci.Name
+      end
+    end
+  end
+  table.sort(texts)
+  PROXYCTL.logtext = texts[1]
+  PROXY = comp
+  dbg("proxy attached:", name, "status:", tostring(PROXYCTL.status), "log:", tostring(PROXYCTL.logtext))
+end
+
+proxyPushStatus = function(v, s)
+  if PROXY == nil or PROXYCTL.status == nil then return end
+  pcall(function() PROXY[PROXYCTL.status].Value = v end)
+  pcall(function() PROXY[PROXYCTL.status].String = s end)
+end
+
+local function proxyPushLog(sev, text)
+  if PROXY == nil then return end
+  text = text:gsub("\r", ""):gsub("\n", " | ")
+  if #text > 500 then text = text:sub(1, 497) .. "..." end
+  if PROXYCTL.sever then pcall(function() PROXY[PROXYCTL.sever].String = sev end) end
+  if PROXYCTL.logtext then pcall(function() PROXY[PROXYCTL.logtext].String = text end) end
+  if PROXYCTL.logtrig then
+    local ok = pcall(function() PROXY[PROXYCTL.logtrig]:Trigger() end)
+    if not ok then pcall(function() PROXY[PROXYCTL.logtrig].Value = 1 end) end
+  end
+end
+
+-- ---------------- email alert ----------------
+local function alert(subject, body)
+  if not Controls["Email Enable"].Boolean then return end
+  local key  = Controls["SMTP2GO API Key"].String
+  local from = Controls["Email From"].String
+  local to   = Controls["Email To"].String
+  if key == "" or from == "" or to == "" or json == nil then
+    dbg("email skipped - not configured")
+    return
+  end
+  local site = Controls["Site Name"].String
+  if site == "" then site = INST end
+  local payload = json.encode({
+    api_key = key,
+    to = splitCSV(to),
+    sender = from,
+    subject = "[Watchdog] " .. site .. ": " .. subject,
+    text_body = body,
+  })
+  local ok, err = pcall(function()
+    HttpClient.Upload({
+      Url = "https://api.smtp2go.com/v3/email/send",
+      Method = "POST",
+      Headers = { ["Content-Type"] = "application/json" },
+      Data = payload,
+      EventHandler = function(tbl, code, d, e) dbg("email result", code, e) end,
+    })
+  end)
+  if not ok then dbg("email error", err) end
+end
+
+-- ---------------- changelog webhook ----------------
+-- POSTs one JSON document per Acknowledge to a relay (VM -> Hudu/Syncro/etc.)
+-- so the master documentation API key never lives on a customer core.
+local function webhookPush(tech, notes, lines, total)
+  local url = Controls["Webhook URL"].String:match("^%s*(.-)%s*$")
+  if url == "" or json == nil then return end
+  local site = Controls["Site Name"].String
+  if site == "" then site = INST end
+  local changes = {}
+  for i = 1, #lines do changes[i] = lines[i]:gsub("^%s+", "") end
+  local ds = Design.GetStatus()
+  local payload = json.encode({
+    v = 1,
+    kind = "qsys-watchdog-ack",
+    site = site,
+    instance = INST,
+    design = tostring(ds.DesignName or ""),
+    design_code = tostring(ds.DesignCode or ""),
+    time = now(),
+    technician = tech,
+    notes = notes,
+    total = total,
+    changes = changes,
+  })
+  local headers = { ["Content-Type"] = "application/json" }
+  local secret = Controls["Webhook Secret"].String
+  if secret ~= "" then headers["X-Watchdog-Secret"] = secret end
+  local ok, err = pcall(function()
+    HttpClient.Upload({
+      Url = url,
+      Method = "POST",
+      Headers = headers,
+      Data = payload,
+      EventHandler = function(tbl, code, d, e)
+        if code and code >= 200 and code < 300 then
+          dbg("webhook ok", code)
+        else
+          log(string.format("WARNING: changelog webhook failed (HTTP %s %s)", tostring(code), tostring(e or "")))
+        end
+      end,
+    })
+  end)
+  if not ok then log("WARNING: changelog webhook error: " .. tostring(err)) end
+end
+
+-- ---------------- remote update (notify + approved hotfix install) ----------
+-- Manifest JSON at Update URL:
+--   { "latest": "1.7.0", "notes": "...",
+--     "hotfix": { "base": "1.6.0", "version": "1.6.0-hf1", "sha256": "<hex>",
+--                 "url": "https://raw.../hotfix.lua", "notes": "..." } }
+-- "latest" is notify-only (design-time changes need a Designer push). A
+-- "hotfix" is a runtime Lua module (must `return function(ctx) ... end`)
+-- that Install fetches, sha256-verifies via Crypto, caches to media/, and
+-- runs now and on every boot while the base version matches. Fail-closed:
+-- no Crypto, hash mismatch, or bad compile means nothing installs.
+local HF_FILE = "media/" .. INST .. "_dw_hotfix.lua"
+local HF_META = "media/" .. INST .. "_dw_hotfix_meta.json"
+local UPD = { newPlugin = nil, hotfix = nil }
+local INSTALLED_HF = { version = "", base = "" }
+local lastNotifyKey = ""
+local updTimer = Timer.New()
+
+local function tohex(s)
+  return (s:gsub(".", function(c) return string.format("%02x", c:byte()) end))
+end
+
+local function verNewer(a, b)
+  local A, B = {}, {}
+  for n in tostring(a):gmatch("%d+") do A[#A + 1] = tonumber(n) end
+  for n in tostring(b):gmatch("%d+") do B[#B + 1] = tonumber(n) end
+  for i = 1, math.max(#A, #B) do
+    local x, y = A[i] or 0, B[i] or 0
+    if x ~= y then return x > y end
+  end
+  return false
+end
+
+local function makeCtx()
+  return {
+    version = PluginInfo.Version,
+    hotfix = INSTALLED_HF.version,
+    log = log, dbg = dbg, alert = alert,
+    proxyPushLog = proxyPushLog,
+    Controls = Controls, Component = Component, Timer = Timer, json = json,
+  }
+end
+
+local function runHotfixChunk(code, why)
+  local f, err = load(code, "watchdog-hotfix", "t")
+  if f == nil then log("HOTFIX compile failed: " .. tostring(err)) return false end
+  local ok, runner = pcall(f)
+  if not ok or type(runner) ~= "function" then
+    log("HOTFIX did not return a function")
+    return false
+  end
+  local ok2, err2 = pcall(runner, makeCtx())
+  if not ok2 then log("HOTFIX runtime error: " .. tostring(err2)) return false end
+  dbg("hotfix executed (" .. why .. ")")
+  return true
+end
+
+local function loadInstalledHotfix()
+  Controls["Installed Hotfix"].String = "(none)"
+  local mf = io.open(HF_META, "r")
+  if not mf then return end
+  local raw = mf:read("*a") mf:close()
+  local ok, meta = pcall(json.decode, raw)
+  if not ok or type(meta) ~= "table" then return end
+  if tostring(meta.base or "") ~= PluginInfo.Version then
+    log("Cached hotfix " .. tostring(meta.version) .. " ignored (built for " ..
+      tostring(meta.base) .. ", running " .. PluginInfo.Version .. ")")
+    return
+  end
+  local cf = io.open(HF_FILE, "r")
+  if not cf then return end
+  local code = cf:read("*a") cf:close()
+  if runHotfixChunk(code, "boot") then
+    INSTALLED_HF.version = tostring(meta.version or "")
+    INSTALLED_HF.base = tostring(meta.base or "")
+    Controls["Installed Hotfix"].String = INSTALLED_HF.version .. " (active)"
+    log("Hotfix " .. INSTALLED_HF.version .. " active")
+  end
+end
+
+local function updInfo(msg) Controls["Update Info"].String = msg end
+
+local function onManifest(code, data)
+  if code ~= 200 or data == nil or data == "" then
+    updInfo("update check failed (HTTP " .. tostring(code) .. ") at " .. os.date("%H:%M"))
+    dbg("manifest fetch failed", code)
+    return
+  end
+  local ok, m = pcall(json.decode, data)
+  if not ok or type(m) ~= "table" then updInfo("update check failed: bad manifest") return end
+  UPD.newPlugin = nil
+  UPD.hotfix = nil
+  if m.latest and verNewer(m.latest, PluginInfo.Version) then UPD.newPlugin = tostring(m.latest) end
+  local hf = m.hotfix
+  if type(hf) == "table" and hf.version and hf.url and hf.sha256
+     and tostring(hf.base or "") == PluginInfo.Version
+     and tostring(hf.version) ~= INSTALLED_HF.version then
+    UPD.hotfix = hf
+  end
+  local avail = (UPD.newPlugin ~= nil) or (UPD.hotfix ~= nil)
+  Controls["Update Available"].Boolean = avail
+  Controls["Update Available"].Value = avail and 1 or 0
+  if not avail then
+    updInfo("up to date (" .. PluginInfo.Version ..
+      (INSTALLED_HF.version ~= "" and ("+" .. INSTALLED_HF.version) or "") ..
+      ", checked " .. os.date("%H:%M") .. ")")
+    return
+  end
+  local parts = {}
+  if UPD.newPlugin then
+    parts[#parts + 1] = "plugin " .. UPD.newPlugin .. " available (install via Designer)"
+  end
+  if UPD.hotfix then
+    parts[#parts + 1] = "hotfix " .. tostring(UPD.hotfix.version) .. " ready to install" ..
+      (UPD.hotfix.notes and (": " .. tostring(UPD.hotfix.notes)) or "")
+  end
+  local msg = table.concat(parts, " | ")
+  updInfo(msg)
+  local key = tostring(UPD.newPlugin) .. "/" .. tostring(UPD.hotfix and UPD.hotfix.version)
+  if key ~= lastNotifyKey then
+    lastNotifyKey = key
+    log("UPDATE AVAILABLE: " .. msg)
+    proxyPushLog("Normal", "Design Watchdog: update available - " .. msg)
+    alert("Update available", "Design Watchdog on '" .. tostring(Design.GetStatus().DesignName) ..
+      "' (running " .. PluginInfo.Version .. "): " .. msg)
+  end
+end
+
+local function checkUpdates(why)
+  local url = Controls["Update URL"].String:match("^%s*(.-)%s*$")
+  if url == "" then updInfo("no manifest URL configured") return end
+  dbg("update check:", why)
+  local ok, err = pcall(function()
+    HttpClient.Download({
+      Url = url,
+      Headers = { ["Cache-Control"] = "no-cache" },
+      EventHandler = function(tbl, code, data, e) onManifest(code, data) end,
+    })
+  end)
+  if not ok then updInfo("update check error: " .. tostring(err)) end
+end
+
+local function installHotfix()
+  local hf = UPD.hotfix
+  if hf == nil then
+    updInfo("nothing installable pending" ..
+      (UPD.newPlugin and (" - plugin " .. UPD.newPlugin .. " needs a Designer push") or ""))
+    return
+  end
+  local gate = Controls["Update Passcode"].String
+  if gate ~= "" and Controls["Passcode"].String ~= gate then
+    updInfo("passcode required to install")
+    log("Hotfix install refused: bad/missing passcode")
+    return
+  end
+  local ok, err = pcall(function()
+    HttpClient.Download({
+      Url = tostring(hf.url),
+      EventHandler = function(tbl, code, data, e)
+        if code ~= 200 or data == nil or data == "" then
+          updInfo("hotfix download failed (HTTP " .. tostring(code) .. ")")
+          return
+        end
+        local okd, dig = pcall(function() return Crypto.Digest("sha256", data) end)
+        if not okd or dig == nil then
+          updInfo("install refused: cannot verify (no Crypto on this firmware)")
+          log("Hotfix install refused: sha256 unavailable")
+          return
+        end
+        local hex = tohex(dig):lower()
+        if hex ~= tostring(hf.sha256):lower() then
+          updInfo("install refused: sha256 mismatch")
+          log("HOTFIX REFUSED: sha256 mismatch (expected " .. tostring(hf.sha256) .. ", got " .. hex .. ")")
+          return
+        end
+        if not runHotfixChunk(data, "install") then
+          updInfo("install failed: hotfix did not run (see log)")
+          return
+        end
+        local f = io.open(HF_FILE, "w")
+        if f then f:write(data) f:close() end
+        local mf = io.open(HF_META, "w")
+        if mf then mf:write(json.encode({ version = tostring(hf.version), base = PluginInfo.Version, sha256 = hex })) mf:close() end
+        INSTALLED_HF.version = tostring(hf.version)
+        INSTALLED_HF.base = PluginInfo.Version
+        Controls["Installed Hotfix"].String = INSTALLED_HF.version .. " (active)"
+        Controls["Passcode"].String = ""
+        UPD.hotfix = nil
+        local avail = UPD.newPlugin ~= nil
+        Controls["Update Available"].Boolean = avail
+        Controls["Update Available"].Value = avail and 1 or 0
+        updInfo("hotfix " .. INSTALLED_HF.version .. " installed" ..
+          (avail and (" | plugin " .. UPD.newPlugin .. " still needs Designer") or ""))
+        local tech = Controls["Technician"].String
+        if tech == "" then tech = "(remote update)" end
+        local note = "Installed Watchdog hotfix " .. INSTALLED_HF.version ..
+          (hf.notes and (": " .. tostring(hf.notes)) or "")
+        log("HOTFIX INSTALLED: " .. INSTALLED_HF.version .. " (sha256 verified)")
+        appendChangelog(tech, note, {}, 0)
+        webhookPush(tech, note, {}, 0)
+        proxyPushLog("Normal", "Design Watchdog: " .. note)
+      end,
+    })
+  end)
+  if not ok then updInfo("install error: " .. tostring(err)) end
+end
+
+updTimer.EventHandler = function() checkUpdates("daily") end
+Controls["Check Updates"].EventHandler = function() checkUpdates("manual") end
+Controls["Install Update"].EventHandler = installHotfix
+
+-- ---------------- chunked snapshot writer ----------------
+local saving, saveAgain = false, false
+local sw = nil
+local requestSave
+
+saveTimer.EventHandler = function()
+  if sw == nil then saveTimer:Stop() saving = false return end
+  local budget = 500
+  while budget > 0 do
+    sw.i = sw.i + 1
+    local name = sw.names[sw.i]
+    if name == nil then
+      sw.f:close()
+      sw = nil
+      saveTimer:Stop()
+      saving = false
+      if saveAgain then saveAgain = false requestSave() end
+      return
+    end
+    local ct = snap[name]
+    if ct then
+      for ctrl, val in pairs(ct) do
+        sw.f:write(name, "\t", ctrl, "\t", val, "\n")
+        budget = budget - 1
+      end
+    end
+    budget = budget - 1
+  end
+end
+
+requestSave = function()
+  if saving then saveAgain = true return end
+  local f = io.open(STATE_FILE, "w")
+  if not f then dbg("cannot write state file") return end
+  local ds = Design.GetStatus()
+  f:write("#code\t", tostring(ds.DesignCode or ""), "\t", tostring(ds.DesignName or ""), "\n")
+  sw = { f = f, names = {}, i = 0 }
+  for k in pairs(snap) do sw.names[#sw.names + 1] = k end
+  table.sort(sw.names)
+  saving = true
+  saveTimer:Start(0.05)
+end
+
+-- ---------------- change coalescing ----------------
+local function onForeignChange(gen, compName, ctrlName, c)
+  if gen ~= GEN then return end
+  local ct = snap[compName]
+  if not ct then return end
+  local nv = readVal(c)
+  local ov = ct[ctrlName]
+  if nv == ov then return end
+  ct[ctrlName] = nv
+  local k = compName .. "\1" .. ctrlName
+  local p = pending[k]
+  if p then
+    p.new = nv
+  else
+    pendingN = pendingN + 1
+    pending[k] = { comp = compName, ctrl = ctrlName, old = ov or "?", new = nv }
+  end
+  settleTimer:Stop()
+  local st = tonumber(Controls["Settle Time"].Value) or 5
+  if st < 1 then st = 1 end
+  settleTimer:Start(st)
+end
+
+local function bumpChangeCount(n)
+  totalSinceAck = totalSinceAck + n
+  Controls["Change Count"].String = tostring(totalSinceAck)
+end
+
+local function markUnacked(n, what)
+  Controls["Unacknowledged"].Boolean = true
+  Controls["Unacknowledged"].Value = 1
+  if not inMaint() and Controls["Latch Until Acknowledged"].Boolean then
+    setStatus(1, string.format("Unacknowledged %s: %d control(s) at %s", what, n, os.date("%H:%M:%S")))
+  end
+end
+
+settleTimer.EventHandler = function()
+  settleTimer:Stop()
+  if pendingN == 0 then return end
+  local detFull, kept = {}, 0
+  for _, p in pairs(pending) do
+    if kept < 200 then
+      detFull[#detFull + 1] = string.format("  %s / %s : %s -> %s", p.comp, p.ctrl, p.old, p.new)
+      kept = kept + 1
+    end
+  end
+  local n = pendingN
+  local tag = inMaint() and " (maintenance)" or ""
+  log(string.format("LIVE EDIT: %d control(s) changed%s", n, tag), true)
+  for i = 1, math.min(#detFull, 20) do log(detFull[i]) end
+  if n > 20 then log(string.format("  ... and %d more", n - math.min(#detFull, 20))) end
+  appendPending(detFull)
+  if n > #detFull then appendPending({ string.format("  ... and %d more", n - #detFull) }) end
+  bumpChangeCount(n)
+  markUnacked(n, "change")
+  if not inMaint() then
+    proxyPushLog("Warning", string.format("Design Watchdog: LIVE EDIT - %d control(s) changed: %s",
+      n, table.concat(detFull, "; ", 1, math.min(#detFull, 3)):gsub("%s+", " ")))
+    alert("Live edit detected",
+      string.format("%d control(s) changed on design '%s' at %s\n\n%s",
+        n, tostring(Design.GetStatus().DesignName), now(), table.concat(detFull, "\n", 1, math.min(#detFull, 40))))
+  end
+  pending, pendingN = {}, 0
+  updateBanner()
+  requestSave()
+end
+
+-- ---------------- builder (component scan) ----------------
+-- A Watchdog / Change Log instance is recognized by its own control signature,
+-- NOT by the Type string from GetComponents (on a real core a compiled plugin
+-- instance does not report PluginInfo.Id there, so v1.1.0 watched itself and
+-- fed back: every log entry changed its own controls -> new event).
+local function looksLikeCompanion(cl)
+  local wd = { ["Change Notes"] = true, ["Unacknowledged"] = true, ["SMTP2GO API Key"] = true, ["Settle Time"] = true }
+  local clg = { ["Changelog"] = true, ["Entries"] = true, ["Last Entry"] = true }
+  local wdh, clgh = 0, 0
+  for _, ci in ipairs(cl) do
+    if wd[ci.Name] then wdh = wdh + 1 end
+    if clg[ci.Name] then clgh = clgh + 1 end
+  end
+  return wdh >= 3 or clgh >= 3
+end
+
+local function finishBuild()
+  builderTimer:Stop()
+  Controls["Watched"].String = string.format("%d components / %d controls", nComps, nCtrls)
+  if redeploy and oldSnap then
+    local detFull, cnt = {}, 0
+    for comp, ctrls_ in pairs(oldSnap) do
+      if snap[comp] == nil then
+        cnt = cnt + 1
+        if #detFull < 200 then detFull[#detFull + 1] = "  removed component: " .. comp end
+      else
+        for ctrl, ov in pairs(ctrls_) do
+          local nv = snap[comp][ctrl]
+          if nv ~= nil and nv ~= ov then
+            cnt = cnt + 1
+            if #detFull < 200 then detFull[#detFull + 1] = string.format("  %s / %s : %s -> %s", comp, ctrl, ov, nv) end
+          end
+        end
+      end
+    end
+    for comp, ct in pairs(snap) do
+      if oldSnap[comp] == nil and next(ct) ~= nil then
+        cnt = cnt + 1
+        if #detFull < 200 then detFull[#detFull + 1] = "  new component: " .. comp end
+      end
+    end
+    local ds = Design.GetStatus()
+    log(string.format("REDEPLOY: design pushed to core (code %s -> %s), %d difference(s) in watched controls%s",
+      tostring(oldCode), tostring(ds.DesignCode), cnt, inMaint() and " (maintenance)" or ""), true)
+    for i = 1, math.min(#detFull, 25) do log(detFull[i]) end
+    if cnt > 25 then log(string.format("  ... and %d more", cnt - math.min(#detFull, 25))) end
+    appendPending({ string.format("  [redeploy %s, code %s -> %s]", now(), tostring(oldCode), tostring(ds.DesignCode)) })
+    appendPending(detFull)
+    if cnt > #detFull then appendPending({ string.format("  ... and %d more", cnt - #detFull) }) end
+    bumpChangeCount((cnt > 0) and cnt or 1)
+    markUnacked(cnt, "redeploy")
+    if not inMaint() then
+      proxyPushLog("Warning", string.format("Design Watchdog: REDEPLOY - design pushed (code %s -> %s), %d diff(s): %s",
+        tostring(oldCode), tostring(ds.DesignCode), cnt,
+        table.concat(detFull, "; ", 1, math.min(#detFull, 3)):gsub("%s+", " ")))
+      alert("Design redeployed",
+        string.format("Design '%s' was pushed to the core at %s.\nDesign code %s -> %s\n%d difference(s) in watched controls:\n\n%s",
+          tostring(ds.DesignName), now(), tostring(oldCode), tostring(ds.DesignCode), cnt,
+          table.concat(detFull, "\n", 1, math.min(#detFull, 40))))
+    end
+  elseif firstRun then
+    log(string.format("Baseline created: %d components / %d controls watched", nComps, nCtrls))
+    setStatus(0, "Watching " .. Controls["Watched"].String)
+  else
+    if Controls["Unacknowledged"].Boolean and Controls["Latch Until Acknowledged"].Boolean and not inMaint() then
+      setStatus(1, "Unacknowledged change (see log)")
+    elseif inMaint() then
+      setStatus(0, "Maintenance mode - alerts paused")
+    else
+      setStatus(0, "Watching " .. Controls["Watched"].String)
+    end
+  end
+  redeploy = false
+  firstRun = false
+  oldSnap = nil
+  updateBanner()
+  requestSave()
+end
+
+builderTimer.EventHandler = function()
+  local budget = 300
+  while budget > 0 do
+    if cursor == nil then
+      qi = qi + 1
+      local name = queue[qi]
+      if name == nil then finishBuild() return end
+      local okc, comp = pcall(Component.New, name)
+      if okc and comp ~= nil then
+        local okl, cl = pcall(Component.GetControls, comp)
+        if not okl or type(cl) ~= "table" then okl, cl = pcall(Component.GetControls, name) end
+        if okl and type(cl) == "table" then
+          if isBanner(name) then
+            local cn = {}
+            for _, ci in ipairs(cl) do cn[#cn + 1] = ci.Name end
+            BANNERS[#BANNERS + 1] = { name = name, comp = comp, ctrls = cn }
+            dbg("banner component:", name)
+          elseif looksLikeCompanion(cl) then
+            dbg("skipping Watchdog/Change Log instance:", name)
+          else
+            cursor = { name = name, comp = comp, list = cl, i = 0 }
+            if snap[name] == nil then snap[name] = {} end
+            nComps = nComps + 1
+          end
+        else
+          dbg("cannot read controls of", name)
+        end
+      else
+        dbg("cannot open component", name)
+      end
+      budget = budget - 5
+    else
+      cursor.i = cursor.i + 1
+      local ci = cursor.list[cursor.i]
+      if ci == nil then
+        cursor = nil
+      else
+        local dir = tostring(ci.Direction or "Read/Write")
+        local typ = tostring(ci.Type or "")
+        if typ ~= "Trigger" and not dir:find("Read Only", 1, true)
+           and not isUserControl(cursor.name, tostring(ci.Name)) then
+          local cname = ci.Name
+          local nm = cursor.name
+          snap[nm][cname] = readVal(ci)
+          nCtrls = nCtrls + 1
+          local gen = GEN
+          local comp = cursor.comp
+          local okh = pcall(function()
+            comp[cname].EventHandler = function(c) onForeignChange(gen, nm, cname, c) end
+          end)
+          if not okh then dbg("no handler on", nm, cname) end
+          budget = budget - 3
+        end
+      end
+      budget = budget - 1
+    end
+  end
+end
+
+local function startWatch(reason)
+  GEN = GEN + 1
+  snap = {}
+  BANNERS = {}
+  nComps, nCtrls = 0, 0
+  pending, pendingN = {}, 0
+  settleTimer:Stop()
+  refreshFilters()
+  queue, qi, cursor = {}, 0, nil
+  local proxyChoices = {}
+  local ok, comps = pcall(Component.GetComponents)
+  if ok and type(comps) == "table" then
+    for _, c in ipairs(comps) do
+      local nm = (type(c) == "table") and c.Name or tostring(c)
+      local ty = (type(c) == "table") and tostring(c.Type or "") or ""
+      local isProxyType = ty:lower():find("proxy", 1, true) ~= nil
+      if isProxyType and nm and nm ~= "" then
+        proxyChoices[#proxyChoices + 1] = nm
+      end
+      if nm and nm ~= "" and ty ~= PluginInfo.Id
+         and not ty:lower():find("designwatchdog", 1, true)
+         and not ty:lower():find("designchangelog", 1, true)
+         and not isProxyType
+         and nm:lower() ~= PROXYNAME
+         and not isIgnored(nm) then
+        queue[#queue + 1] = nm
+      end
+    end
+  end
+  table.sort(queue)
+  table.sort(proxyChoices)
+  pcall(function() Controls["Proxy Name"].Choices = proxyChoices end)
+  dbg("proxy candidates:", #proxyChoices)
+  attachProxy()
+  setStatus(5, "Scanning design (" .. #queue .. " components)...")
+  dbg("watch start:", reason, #queue, "components")
+  builderTimer:Stop()
+  builderTimer:Start(0.05)
+end
+
+-- ---------------- maintenance mode ----------------
+local function endMaintenance(how)
+  if Controls["Maintenance Mode"].Boolean then
+    Controls["Maintenance Mode"].Boolean = false
+    Controls["Maintenance Mode"].Value = 0
+  end
+  maintTimer:Stop()
+  local unacked = Controls["Unacknowledged"].Boolean
+  log("MAINTENANCE MODE ended (" .. how .. ")" .. (unacked and " - unacknowledged changes outstanding" or ""))
+  proxyPushLog(unacked and "Warning" or "Normal",
+    "Design Watchdog: maintenance mode ended (" .. how .. ")" .. (unacked and " - unacknowledged changes outstanding" or ""))
+  if unacked then
+    if Controls["Latch Until Acknowledged"].Boolean then
+      setStatus(1, "Unacknowledged changes after maintenance window")
+    end
+    alert("Maintenance window ended with unacknowledged changes",
+      string.format("%s change(s) since last acknowledge on design '%s'. Enter notes + technician and press Acknowledge in the Design Watchdog.",
+        Controls["Change Count"].String, tostring(Design.GetStatus().DesignName)))
+  else
+    setStatus(0, "Watching " .. Controls["Watched"].String)
+  end
+  updateBanner()
+end
+
+local function startMaintenance(resumed)
+  local hrs = tonumber(Controls["Maintenance Hours"].Value) or 4
+  if hrs < 1 then hrs = 1 end
+  maintDeadline = os.time() + hrs * 3600
+  local tech = Controls["Technician"].String
+  log(string.format("MAINTENANCE MODE %s%s - change alerts paused for %dh (until %s)",
+    resumed and "resumed after restart" or "started",
+    (tech ~= "" and (" by " .. tech) or ""), hrs, os.date("%H:%M", maintDeadline)))
+  proxyPushLog("Normal", string.format("Design Watchdog: maintenance mode %s%s (%dh window)",
+    resumed and "resumed" or "started", (tech ~= "" and (" by " .. tech) or ""), hrs))
+  setStatus(0, "Maintenance mode - alerts paused")
+  maintTimer:Start(30)
+  updateBanner()
+end
+
+maintTimer.EventHandler = function()
+  if Controls["Maintenance Mode"].Boolean and os.time() >= maintDeadline then
+    endMaintenance("timer expired")
+  end
+end
+
+Controls["Maintenance Mode"].EventHandler = function(c)
+  if c.Boolean then startMaintenance(false) else endMaintenance("switched off") end
+end
+
+-- ---------------- buttons ----------------
+local function doAcknowledge(source)
+  local tech  = Controls["Technician"].String
+  local notes = Controls["Change Notes"].String
+  local lines, total = readPending(300)
+  if total > 0 or notes ~= "" then
+    appendChangelog(tech, notes, lines, total)
+    webhookPush(tech, notes, lines, total)
+  end
+  techTouch()
+  clearPending()
+  Controls["Unacknowledged"].Boolean = false
+  Controls["Unacknowledged"].Value = 0
+  totalSinceAck = 0
+  Controls["Change Count"].String = "0"
+  if inMaint() then
+    setStatus(0, "Maintenance mode - alerts paused")
+  else
+    setStatus(0, "Watching " .. Controls["Watched"].String)
+  end
+  LASTACK = now()
+  LASTACKBY = tech
+  saveSettings()
+  local flat = notes:gsub("\r", ""):gsub("\n", " / ")
+  log("ACKNOWLEDGED by " .. (tech == "" and "(unknown)" or tech)
+    .. (flat ~= "" and (". Notes: " .. flat) or " (no notes)")
+    .. string.format(" [%d change(s) -> changelog]", total)
+    .. (source == "banner" and " (via banner)" or ""))
+  proxyPushLog("Normal", string.format("Design Watchdog: ACKNOWLEDGED by %s (%d change(s)).%s",
+    tech == "" and "(unknown)" or tech, total, flat ~= "" and (" Notes: " .. flat) or ""))
+  Controls["Change Notes"].String = ""
+  updateBanner()
+end
+
+nagTimer.EventHandler = function()
+  nagTimer:Stop()
+  updateBanner()
+end
+
+Controls["Banner"].EventHandler = function()
+  if not Controls["Unacknowledged"].Boolean then return end
+  if inMaint() then return end
+  if Controls["Technician"].String == "" then
+    pcall(function()
+      Controls["Banner"].Legend = "ENTER TECHNICIAN (+ NOTES) on the Watchdog, then press again"
+      Controls["Banner"].Color = COL_RED
+    end)
+    nagTimer:Stop()
+    nagTimer:Start(4)
+    return
+  end
+  doAcknowledge("banner")
+end
+
+Controls["Acknowledge"].EventHandler = function()
+  doAcknowledge("button")
+end
+
+Controls["Clear Log"].EventHandler = function()
+  LOGV = {}
+  refreshLogControl()
+  local f = io.open(LOG_FILE, "w")
+  if f then f:close() end
+  log("Log cleared")
+end
+
+Controls["Rescan"].EventHandler = function()
+  log("Rescan requested")
+  startWatch("rescan")
+end
+
+Controls["APPLY"].EventHandler = function()
+  DBG = Controls["Debug"].Boolean
+  saveSettings()
+  log("Settings applied and saved")
+  startWatch("apply")
+end
+
+Controls["Debug"].EventHandler = function(c) DBG = c.Boolean end
+
+-- ---------------- boot ----------------
+local hadSettings = loadSettings()
+if not hadSettings then
+  Controls["Latch Until Acknowledged"].Boolean = true
+  Controls["Latch Until Acknowledged"].Value = 1
+  Controls["Banner Name"].String = "BANNER"
+end
+if (tonumber(Controls["Settle Time"].Value) or 0) < 1 then Controls["Settle Time"].Value = 5 end
+if (tonumber(Controls["Maintenance Hours"].Value) or 0) < 1 then Controls["Maintenance Hours"].Value = 4 end
+if (tonumber(Controls["Tech Timeout"].Value) or 0) < 1 then Controls["Tech Timeout"].Value = 8 end
+DBG = Controls["Debug"].Boolean
+loadLogTail()
+loadState()
+
+local ds = Design.GetStatus()
+if oldCode == nil then
+  firstRun = true
+  log("Watchdog started - no previous snapshot, creating baseline for design '" .. tostring(ds.DesignName) .. "'")
+elseif oldCode ~= ds.DesignCode then
+  redeploy = true
+  log("Script restarted with a NEW design code - someone pushed a design to this core")
+  if Controls["Technician"].String ~= "" then
+    Controls["Technician"].String = ""
+    log("Technician field cleared (design was redeployed - identity unknown)")
+  end
+else
+  log("Script restarted (core reboot / design restart) - design code unchanged")
+end
+
+-- unacknowledged truth survives restarts via the pending file
+local _, pn = readPending(1)
+if pn > 0 then
+  Controls["Unacknowledged"].Boolean = true
+  Controls["Unacknowledged"].Value = 1
+end
+Controls["Change Count"].String = tostring(totalSinceAck)
+if Controls["Update URL"].String == "" then
+  Controls["Update URL"].String = "https://raw.githubusercontent.com/elevateav/qsys-design-watchdog/main/manifest.json"
+end
+techTimer:Start(60)
+if Controls["Maintenance Mode"].Boolean then startMaintenance(true) end
+startWatch("boot")
+loadInstalledHotfix()
+updTimer:Start(86400)
+checkUpdates("boot")
+
+end
